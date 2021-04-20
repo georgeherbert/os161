@@ -162,9 +162,11 @@ lock_create(const char *name)
 		kfree(lock);
 		return NULL;
 	}
-	spinlock_init(&lock->lk_lock);
 
-	lock->lk_thread = NULL;
+	lock->held = false;
+	lock->thread = NULL;
+
+	spinlock_init(&lock->lk_lock);
 
 	return lock;
 }
@@ -173,25 +175,34 @@ void
 lock_destroy(struct lock *lock)
 {
 	KASSERT(lock != NULL);
-
-	wchan_destroy(lock->lk_wchan);
+	KASSERT(lock->held == false);
 
 	kfree(lock->lk_name);
+
+	wchan_destroy(lock->lk_wchan);
+	spinlock_cleanup(&lock->lk_lock);
+
 	kfree(lock);
 }
 
 void
 lock_acquire(struct lock *lock)
 {
+	KASSERT(lock != NULL);
+	KASSERT(curthread->t_in_interrupt == false);
+	KASSERT(lock_do_i_hold(lock) == false);
+
 	/* Call this (atomically) before waiting for a lock */
 	HANGMAN_WAIT(&curthread->t_hangman, &lock->lk_hangman);
 
 	spinlock_acquire(&lock->lk_lock);
-	while (lock->lk_thread != NULL) {
+	while (lock->held) {
 		wchan_sleep(lock->lk_wchan, &lock->lk_lock);
 	}
 
-	lock->lk_thread = curthread;
+	KASSERT(lock->held == false);
+	lock->held = true;
+	lock->thread = curthread;
 	spinlock_release(&lock->lk_lock);
 
 	/* Call this (atomically) once the lock is acquired */
@@ -201,20 +212,27 @@ lock_acquire(struct lock *lock)
 void
 lock_release(struct lock *lock)
 {
+	KASSERT(lock != NULL);
+	KASSERT(lock_do_i_hold(lock) == true);
+
 	spinlock_acquire(&lock->lk_lock);
-	lock->lk_thread = NULL;
+	lock->held = false;
+	lock->thread = NULL;
+	KASSERT(lock->held == false);
 	wchan_wakeone(lock->lk_wchan, &lock->lk_lock);
-	spinlock_release(&lock->lk_lock);
 
 	/* Call this (atomically) when the lock is released */
 	HANGMAN_RELEASE(&curthread->t_hangman, &lock->lk_hangman);
 
+	spinlock_release(&lock->lk_lock);
 }
 
 bool
 lock_do_i_hold(struct lock *lock)
 {
-	return (lock->lk_thread == curthread);
+	KASSERT(lock != NULL);
+
+	return (lock->thread == curthread);
 }
 
 ////////////////////////////////////////////////////////////
